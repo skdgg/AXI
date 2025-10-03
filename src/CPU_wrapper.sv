@@ -105,7 +105,7 @@ logic [`AXI_ADDR_BITS-1:0]    M0_ARADDR_q;
 logic [`AXI_DATA_BITS-1:0]    m0_rdata_q;
 logic                         m0_want_issue;    
 // IM read request
-assign m0_want_issue = IM_CEB && !m0_inflight;
+assign m0_want_issue = IM_CEB && !m0_inflight && !(M0_ARVALID_q && ARREADY_M0);
 
 // AR：VALID until READY 
 always_ff @(posedge ACLK or negedge ARESETn) begin
@@ -147,9 +147,11 @@ logic                         m1r_inflight;
 logic                         M1_ARVALID_q;
 logic [`AXI_ADDR_BITS-1:0]    M1_ARADDR_q;
 logic [`AXI_DATA_BITS-1:0]    m1_rdata_q;
+logic                         dm_read_req;
+logic                         m1r_want_issue;
 
-wire dm_read_req    = (!DM_CEB) && (DM_WEB==1'b1);   
-wire m1r_want_issue = dm_read_req && !m1r_inflight;
+assign dm_read_req    = (!DM_CEB) && (DM_WEB==1'b1);   
+assign m1r_want_issue = dm_read_req && !m1r_inflight && !(M1_ARVALID_q && ARREADY_M1);
 
 always_ff @(posedge ACLK or negedge ARESETn) begin
   if (!ARESETn) begin
@@ -184,60 +186,79 @@ assign DM_DO = m1_rdata_q;
 // =====================================================================
 // M1: DM WRITE (AW/W/B) 
 // =====================================================================
-logic                         m1w_inflight;
-logic                         M1_AWVALID_q, M1_WVALID_q;
-logic [`AXI_ADDR_BITS-1:0]    M1_AWADDR_q;
-logic [`AXI_DATA_BITS-1:0]    M1_WDATA_q;
-logic [`AXI_STRB_BITS-1:0]    M1_WSTRB_q;
+logic    w_write_start,phantom_write;
 
-wire dm_write_req   = (!DM_CEB) && (DM_WEB==1'b0);
 
-wire aw_slot_free   = (!M1_AWVALID_q) || AWREADY_M1;
-wire w_slot_free    = (!M1_WVALID_q)  || WREADY_M1;
-wire m1w_want_issue = dm_write_req && !m1w_inflight && aw_slot_free && w_slot_free;
+// WLAST_M1
+always_ff @(posedge ACLK or negedge ARESETn) begin
+	if (!ARESETn) begin
+		WLAST_M1 <= 1'b0;
+	end else if (!WVALID_M1 || WREADY_M1) begin
+		WLAST_M1 <= 1;
+	end
+end
 
+	// w_write_start
+always_comb begin
+	w_write_start = 1'b1;
+
+	// 
+	if (phantom_write)
+		w_write_start = 1'b0;
+
+	if (AWVALID_M1 && !AWREADY_M1)
+		w_write_start = 1'b0;
+
+	if (WVALID_M1 && (!WLAST_M1 || !WREADY_M1))
+		w_write_start = 1'b0;
+
+	if (!ARESETn)
+		w_write_start = 1'b0;
+end
+
+
+
+	// AWVALID_M1, phantom_write
+always_ff @(posedge ACLK or negedge ARESETn) begin
+	if (!ARESETn) begin
+	  AWVALID_M1 <= 1'b0;
+		phantom_write <= 1'b0;
+	end else if (!AWVALID_M1 || AWREADY_M1) begin
+		AWVALID_M1 <= w_write_start;
+		phantom_write <= w_write_start;
+	end else begin
+		phantom_write <= 1'b0;
+	end
+end
+
+
+	// WVALID_M1
+always_ff @(posedge ACLK or negedge ARESETn) begin
+	if (!ARESETn) begin
+		WVALID_M1 <= 1'b0;
+	end else if (!WVALID_M1 || WREADY_M1) begin
+		if (AWVALID_M1) begin
+		WVALID_M1 <= 1'b1;
+		end
+		else if (WVALID_M1 && !WLAST_M1) begin
+		WVALID_M1 <= 1'b1;
+		end
+		else begin
+		WVALID_M1 <= 1'b0;
+		end
+	end
+end
 always_ff @(posedge ACLK or negedge ARESETn) begin
   if (!ARESETn) begin
-    M1_AWVALID_q <= 1'b0;
-    M1_WVALID_q  <= 1'b0;
-    M1_AWADDR_q  <= '0;
-    M1_WDATA_q   <= '0;
-    M1_WSTRB_q   <= '0;
-  end else begin
-    // AW
-    if (aw_slot_free) begin
-      M1_AWVALID_q <= m1w_want_issue;
-      if (m1w_want_issue) M1_AWADDR_q <= {15'd0, DM_addr, 2'd0};
-    end
-    // W
-    if (w_slot_free) begin
-      M1_WVALID_q <= m1w_want_issue;
-      if (m1w_want_issue) begin
-        M1_WDATA_q <= DM_DI;
-        M1_WSTRB_q <= { &DM_BWEB[31:24], &DM_BWEB[23:16], &DM_BWEB[15:8], &DM_BWEB[7:0] };
-      end
-    end
+    AWADDR_M1  <= '0;
+  end else if (!AWVALID_M1 || AWREADY_M1) begin
+    AWADDR_M1 <= {15'd0, DM_addr, 2'd0};
   end
 end
 
-assign AWVALID_M1 = M1_AWVALID_q;
-assign AWADDR_M1  = M1_AWADDR_q;
-
-assign WVALID_M1  = M1_WVALID_q;
-assign WDATA_M1   = M1_WDATA_q;
-assign WSTRB_M1   = M1_WSTRB_q;
-
-always_ff @(posedge ACLK or negedge ARESETn) begin
-  if (!ARESETn) m1w_inflight <= 1'b0;
-  else begin
-    if (m1w_want_issue && aw_slot_free && w_slot_free) m1w_inflight <= 1'b1;
-    if (BVALID_M1 && BREADY_M1)                        m1w_inflight <= 1'b0;
-  end
-end
-
-assign BREADY_M1 = m1w_inflight;
-
-assign DM_STOP = (m1r_inflight | m1w_inflight);
+assign BREADY_M1 = 1'd1;
+assign WDATA_M1 = DM_DI;
+assign DM_STOP = 1'd1;
 
 
 CPU CPU(
@@ -258,3 +279,4 @@ CPU CPU(
   .dm_bweb(DM_BWEB),
   .dm_data_in(DM_DI)
 );
+endmodule
